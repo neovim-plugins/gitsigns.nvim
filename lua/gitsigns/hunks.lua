@@ -125,6 +125,33 @@ function M.patch_lines(hunk, fileformat)
   return lines
 end
 
+--- @param text string[]
+--- @param hunk Gitsigns.Hunk.Hunk
+--- @param reverse? boolean
+--- @return string[]
+function M.apply_to_text(text, hunk, reverse)
+  local removed = reverse and hunk.added or hunk.removed
+  local added = reverse and hunk.removed or hunk.added
+
+  local start = removed.start
+  if start == 0 then
+    start = 1
+  end
+
+  local new = {} --- @type string[]
+  if start > 1 then
+    vim.list_extend(new, vim.list_slice(text, 1, start - 1))
+  end
+  if added.count > 0 then
+    vim.list_extend(new, added.lines)
+  end
+  local tail_start = start + removed.count
+  if tail_start <= #text then
+    vim.list_extend(new, vim.list_slice(text, tail_start, #text))
+  end
+  return new
+end
+
 local function tointeger(x)
   return tonumber(x) --[[@as integer]]
 end
@@ -415,7 +442,7 @@ function M.find_nearest_hunk(lnum, hunks, direction, wrap)
       end
     end
   elseif direction == 'prev' then
-    if max(assert(hunks[#hunks]).vend) < lnum then
+    if max(hunks[#hunks].vend) < lnum then
       return #hunks
     end
     for i = 1, #hunks do
@@ -575,15 +602,6 @@ function M.linespec_for_hunk(hunk, fileformat)
       }
       hls[#hls + 1] = { { spec.sym .. l, { mark } } }
     end
-    if config.diff_opts.internal then
-      if
-        spec.lines == removed and hunk.removed.no_nl_at_eof
-        or spec.lines == added and hunk.added.no_nl_at_eof
-      then
-        local mark = { start_row = 0, end_row = 1, hl_group = 'GitSignsNoEOLPreview' }
-        hls[#hls + 1] = { { spec.sym .. '\\ No newline at end of file', { mark } } }
-      end
-    end
   end
 
   if config.diff_opts.internal then
@@ -610,6 +628,17 @@ function M.linespec_for_hunk(hunk, fileformat)
         start_col = region[3],
         end_col = region[4],
       }
+    end
+
+    local no_nl_at_eof ---@type integer?
+    if hunk.removed.no_nl_at_eof and not hunk.added.no_nl_at_eof then
+      no_nl_at_eof = hunk.removed.count + 1
+    elseif not hunk.removed.no_nl_at_eof and hunk.added.no_nl_at_eof then
+      no_nl_at_eof = hunk.removed.count + hunk.added.count + 1
+    end
+    if no_nl_at_eof then
+      local mark = { start_row = 0, end_row = 1, hl_group = 'GitSignsNoEOLPreview' }
+      table.insert(hls, no_nl_at_eof, { { '\\ No newline at end of file', { mark } } })
     end
   end
 
