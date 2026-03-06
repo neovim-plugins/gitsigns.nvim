@@ -198,6 +198,12 @@ local function reblame(opts, blame, win, revision, parent)
   if not did_attach then
     return
   end
+
+  local src_buf = api.nvim_win_get_buf(win)
+  local line_count = api.nvim_buf_line_count(src_buf)
+  local new_lnum = math.min(lnum, line_count)
+  api.nvim_win_set_cursor(win, { new_lnum, 0 })
+
   async.schedule()
   M.blame(opts)
 end
@@ -538,7 +544,9 @@ function M.blame(opts)
     pattern = tostring(blm_win),
     group = group,
     callback = function()
-      api.nvim_buf_clear_namespace(bufnr, ns, 0, -1)
+      if api.nvim_buf_is_valid(bufnr) then
+        api.nvim_buf_clear_namespace(bufnr, ns, 0, -1)
+      end
       if api.nvim_win_is_valid(win) then
         cur_wlo.foldenable, cur_wlo.scrollbind, cur_wlo.wrap = unpack(cur_orig_wlo)
       end
