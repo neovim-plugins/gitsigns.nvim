@@ -341,6 +341,36 @@ function M:files_changed(base, include_untracked)
   return ret
 end
 
+--- @async
+--- @param attr string
+--- @param files string[]
+--- @return table<string,'set'|'unset'|'unspecified'|string>
+function M:check_attr(attr, files)
+  local ret = {} --- @type table<string,'set'|'unset'|'unspecified'|string>
+
+  if #files == 0 then
+    return ret
+  end
+
+  for _, f in ipairs(files) do
+    ret[f] = 'unspecified'
+  end
+
+  local output = self:command({ 'check-attr', attr, '--stdin' }, { stdin = files })
+  local sep = ': ' .. attr .. ': '
+
+  for _, line in ipairs(output) do
+    local parts = vim.split(line, sep, { plain = true })
+    local file = parts[1]
+    if file and #parts >= 2 then
+      local value = table.concat(parts, sep, 2)
+      ret[file] = value
+    end
+  end
+
+  return ret
+end
+
 --- @param encoding string
 --- @return boolean
 local function iconv_supported(encoding)
@@ -439,8 +469,18 @@ function M.get(cwd, gitdir, toplevel)
       return nil, err
     end
 
-    repo_cache[info.gitdir] = repo_cache[info.gitdir] or M._new(info)
-    return repo_cache[info.gitdir]
+    local repo = repo_cache[info.gitdir]
+    if repo then
+      -- Keep cached repo metadata in sync with git's current state.
+      -- Without this, branch/rebase transitions can leave abbrev_head stale
+      -- until a watcher callback runs.
+      repo.abbrev_head = info.abbrev_head
+      repo.detached = info.detached
+    else
+      repo = M._new(info)
+      repo_cache[info.gitdir] = repo
+    end
+    return repo
   end)
 end
 
