@@ -22,6 +22,7 @@ local uv = vim.uv or vim.loop ---@diagnostic disable-line: deprecated
 --- Username configured for the repo.
 --- Needed for to determine "You" in current line blame.
 --- @field username string
+--- @field private _lock Gitsigns.async.Semaphore
 --- @field private _watcher? Gitsigns.Repo.Watcher
 --- @field head_oid? string
 --- @field head_ref? string
@@ -103,8 +104,7 @@ local function get_abbrev_head(gitdir, head)
   --   "<commitsha>" (detached HEAD)
   local refpath = parse_head_ref(head)
   if refpath then
-    -- Extract last path component (branch name)
-    return refpath:match('([^/]+)$') or refpath
+    return refpath:match('^refs/heads/(.+)$') or refpath
   end
 
   assert(head:find('^[%x]+$'), 'Invalid HEAD content: ' .. head)
@@ -288,6 +288,16 @@ function M:on_update(callback)
   return self._watcher:on_update(callback)
 end
 
+--- Run a function while holding the repo lock.
+--- This serializes git operations that mutate repo state such as the index.
+--- @async
+--- @generic R
+--- @param fn async fun(): R...
+--- @return R...
+function M:lock(fn)
+  return self._lock:with(fn)
+end
+
 --- Run git command the with the objects gitdir and toplevel
 --- @async
 --- @param args table<any,any>
@@ -315,27 +325,39 @@ end
 --- @async
 --- @param base string?
 --- @param include_untracked? boolean
---- @return string[]
+--- @return {path:string, oldpath?:string}[]
 function M:files_changed(base, include_untracked)
+  local ret = {} --- @type {path:string, oldpath?:string}[]
+
   if base and base ~= ':0' then
     local results = self:command({ 'diff', '--name-status', base })
-    for i, result in ipairs(results) do
-      results[i] = vim.split(result:gsub('\t', ' '), ' ', { plain = true })[2]
+    for _, result in ipairs(results) do
+      local parts = vim.split(result, '\t', { plain = true })
+      local status = parts[1]
+      local path = parts[#parts]
+      local renamed = status and (vim.startswith(status, 'R') or vim.startswith(status, 'C'))
+      if path then
+        ret[#ret + 1] = {
+          path = path,
+          oldpath = renamed and parts[2] or nil,
+        }
+      end
     end
     if include_untracked then
       local untracked = self:command({ 'ls-files', '--others', '--exclude-standard' })
-      vim.list_extend(results, untracked)
+      for _, path in ipairs(untracked) do
+        ret[#ret + 1] = { path = path }
+      end
     end
-    return results
+    return ret
   end
 
   local results = self:command({ 'status', '--porcelain', '--ignore-submodules' })
 
-  local ret = {} --- @type string[]
   for _, line in ipairs(results) do
     local status = line:sub(1, 2)
     if status:match('^.M') or (include_untracked and status == '??') then
-      ret[#ret + 1] = line:sub(4, -1)
+      ret[#ret + 1] = { path = line:sub(4, -1) }
     end
   end
   return ret
@@ -398,6 +420,35 @@ function M:get_show_text(object, encoding)
   return stdout, stderr
 end
 
+--- @async
+--- Get version of file at revision. If the path was renamed after `revision`,
+--- resolve the old path before reading the blob.
+--- @param revision string
+--- @param relpath string
+--- @param encoding? string
+--- @return string[] stdout, string? stderr
+function M:get_show_text_at_revision(revision, relpath, encoding)
+  local stdout, stderr = self:get_show_text(revision .. ':' .. relpath, encoding)
+
+  if
+    stderr
+    and (
+      stderr:match(errors.e.path_does_not_exist)
+      or stderr:match(errors.e.path_exist_on_disk_but_not_in)
+    )
+  then
+    log.dprintf('%s not found in %s looking for renames', relpath, revision)
+    local old_path = self:diff_rename_status(revision, true)[relpath]
+      or self:log_rename_status(revision, relpath)
+    if old_path then
+      log.dprintf('found rename %s -> %s', old_path, relpath)
+      stdout, stderr = self:get_show_text(revision .. ':' .. old_path, encoding)
+    end
+  end
+
+  return stdout, stderr
+end
+
 --- @type table<string,Gitsigns.Repo?>
 local repo_cache = setmetatable({}, { __mode = 'v' })
 
@@ -408,6 +459,7 @@ local repo_cache = setmetatable({}, { __mode = 'v' })
 function M._new(info)
   --- @type Gitsigns.Repo
   local self = setmetatable(info, { __index = M })
+  self._lock = async.semaphore(1)
   self.username = self:command({ 'config', 'user.name' }, { ignore_error = true })[1]
 
   self.commondir = get_commondir(self.gitdir)
@@ -782,6 +834,32 @@ function M:hash_object(path, lines)
   return assert(res)
 end
 
+--- @param line string?
+--- @return string? status
+--- @return string? path
+--- @return string? path2
+local function parse_name_status_line(line)
+  if not line then
+    return
+  end
+
+  local parts = vim.split(line, '\t', { plain = true })
+  if #parts < 2 then
+    return
+  end
+
+  local status = parts[1]
+  if not status then
+    return
+  end
+
+  if vim.startswith(status, 'R') or vim.startswith(status, 'C') then
+    return status, parts[2], parts[3]
+  end
+
+  return status, parts[2]
+end
+
 --- @async
 --- @param revision string
 --- @param path string
@@ -797,11 +875,8 @@ function M:log_rename_status(revision, path)
     '--',
     path,
   })
-  local line = out[#out]
-  if not line then
-    return
-  end
-  return vim.split(line, '%s+')[2]
+  local _, old_path = parse_name_status_line(out[#out])
+  return old_path
 end
 
 --- @async
@@ -819,16 +894,12 @@ function M:diff_rename_status(revision, invert)
   })
   local ret = {} --- @type table<string,string>
   for _, l in ipairs(out) do
-    local parts = vim.split(l, '%s+')
-    if #parts == 3 then
-      --- @cast parts [string, string, string]
-      local stat, orig_file, new_file = parts[1], parts[2], parts[3]
-      if vim.startswith(stat, 'R') then
-        if invert then
-          ret[new_file] = orig_file
-        else
-          ret[orig_file] = new_file
-        end
+    local stat, orig_file, new_file = parse_name_status_line(l)
+    if stat and vim.startswith(stat, 'R') and orig_file and new_file then
+      if invert then
+        ret[new_file] = orig_file
+      else
+        ret[orig_file] = new_file
       end
     end
   end
