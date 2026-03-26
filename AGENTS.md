@@ -27,7 +27,7 @@
 
 ## Testing Guidelines
 
-- Every bug fix must include a spec that reproduces the regression and asserts the desired buffer state, co-located with related modules (for example, `hunk_spec.lua` for hunk logic).
+- Add or update tests for risky, non-obvious, or broad changes; small localized fixes can skip dedicated regression coverage when existing tests are enough.
 - Keep tests deterministic by guarding optional Git features and running the version matrix (`make test-010 && make test-nightly`) when Neovim internals are touched.
 
 ## Commit & Pull Request Guidelines
