@@ -685,8 +685,6 @@ end
 --- @return string? err
 function M:ls_tree(path, revision)
   local results, stderr, code = self:command({
-    '-c',
-    'core.quotepath=off',
     'ls-tree',
     revision,
     path,
@@ -746,8 +744,6 @@ function M:ls_files(file)
   -- files.
   local results, stderr, code = self:command(
     util.flatten({
-      '-c',
-      'core.quotepath=off',
       'ls-files',
       '--stage',
       '--others',
