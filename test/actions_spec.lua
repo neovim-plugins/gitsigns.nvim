@@ -2,7 +2,6 @@ local helpers = require('test.gs_helpers')
 
 local setup_gitsigns = helpers.setup_gitsigns
 local feed = helpers.feed
-local test_file = helpers.test_file
 local edit = helpers.edit
 local check = helpers.check
 local exec_lua = helpers.exec_lua
@@ -13,10 +12,16 @@ local setup_test_repo = helpers.setup_test_repo
 local eq = helpers.eq
 local expectf = helpers.expectf
 local git = helpers.git
-local scratch = helpers.scratch
 local write_to_file = helpers.write_to_file
+local scratch --- @type string
+local test_file --- @type string
 
 helpers.env()
+
+local function refresh_paths()
+  scratch = helpers.scratch
+  test_file = helpers.test_file
+end
 
 --- @param exp_hunks string[]
 local function expect_hunks(exp_hunks)
@@ -51,18 +56,19 @@ local function expect_hunks(exp_hunks)
   end)
 end
 
-local delay = 10
+local delay = 1
 
 --- @param cmd string
 local function command(cmd)
-  helpers.sleep(delay)
   api.nvim_command(cmd)
 
   -- Flaky tests, add a large delay between commands.
   -- Flakiness is due to actions being async and problems occur when an action
   -- is run while another action or update is running.
   -- Must wait for actions and updates to finish.
-  helpers.sleep(delay)
+  if delay > 0 then
+    helpers.sleep(delay)
+  end
 end
 
 local function retry(f)
@@ -73,14 +79,15 @@ local function retry(f)
     --- @type boolean, string?
     ok, err = pcall(f)
     if ok then
+      delay = orig_delay
       return
     end
     delay = math.ceil(delay * 1.6)
     print('failed, retrying with delay', delay)
   end
 
+  delay = orig_delay
   if err then
-    delay = orig_delay
     error(err)
   end
 end
@@ -134,6 +141,7 @@ describe('actions', function()
 
   before_each(function()
     clear()
+    refresh_paths()
     helpers.chdir_tmp()
     setup_gitsigns(test_config)
   end)
@@ -262,16 +270,30 @@ describe('actions', function()
       signs = {},
     })
 
-    helpers.sleep(500)
+    expectf(function()
+      eq({
+        {
+          added = 0,
+          changed = 0,
+          removed = 0,
+          head = 'main',
+        },
+      }, exec_lua('return _G.test_gitsigns_update_events'))
+    end, 10)
+  end)
 
-    eq({
-      {
-        added = 0,
-        changed = 0,
-        removed = 0,
-        head = 'main',
-      },
-    }, exec_lua('return _G.test_gitsigns_update_events'))
+  it('can undo staged add hunks', function()
+    setup_test_repo()
+    edit(test_file)
+
+    set_lines(1, 1, { 'added-1', 'added-2' })
+    expect_hunks({ '@@ -1 +2,2 @@' })
+
+    api.nvim_win_set_cursor(0, { 2, 0 })
+    command('Gitsigns stage_hunk')
+
+    command('Gitsigns undo_stage_hunk')
+    expect_hunks({ '@@ -1 +2,2 @@' })
   end)
 
   it('preserves foldenable in diffthis windows after staging a hunk', function()
@@ -323,8 +345,7 @@ describe('actions', function()
   end)
 
   describe('staging partial hunks', function()
-    setup(function()
-      clear()
+    before_each(function()
       setup_test_repo({ test_file_text = { 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H' } })
     end)
 

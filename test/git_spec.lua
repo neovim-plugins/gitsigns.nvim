@@ -5,15 +5,20 @@ local clear = helpers.clear
 local eq = helpers.eq
 local exec_lua = helpers.exec_lua
 local git = helpers.git
-local scratch = helpers.scratch
 local setup_test_repo = helpers.setup_test_repo
 local write_to_file = helpers.write_to_file
+local scratch --- @type string
 
 helpers.env()
+
+local function refresh_paths()
+  scratch = helpers.scratch
+end
 
 describe('git', function()
   before_each(function()
     clear()
+    refresh_paths()
     helpers.setup_path()
   end)
 
@@ -43,7 +48,7 @@ describe('git', function()
         .run(function()
           obj_a:lock(function()
             _G._git_lock_events[#_G._git_lock_events + 1] = 'a_enter'
-            sleep(2500)
+            sleep(200)
             _G._git_lock_events[#_G._git_lock_events + 1] = 'a_exit'
           end)
         end)
@@ -59,7 +64,7 @@ describe('git', function()
         end)
         :raise_on_error()
 
-      vim.wait(4000, function()
+      vim.wait(1000, function()
         return #_G._git_lock_events == 4
       end, 10, true)
 
@@ -88,11 +93,13 @@ describe('git', function()
       local Repo = require('gitsigns.git.repo')
 
       local repo = assert(async.run(Repo.get, repo_dir):wait(5000))
-      return async
+      local ret = async
         .run(function()
           return repo:log_rename_status('HEAD~1', 'new name.txt')
         end)
         :wait(5000)
+      repo:unref()
+      return ret
     end, scratch)
 
     eq('old name.txt', old_relpath)
@@ -115,11 +122,13 @@ describe('git', function()
       local Repo = require('gitsigns.git.repo')
 
       local repo = assert(async.run(Repo.get, repo_dir):wait(5000))
-      return async
+      local ret = async
         .run(function()
           return repo:log_rename_status('HEAD~1', 'bår.txt')
         end)
         :wait(5000)
+      repo:unref()
+      return ret
     end, scratch)
 
     eq('föobær.txt', old_relpath)

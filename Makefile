@@ -1,5 +1,6 @@
 export XDG_DATA_HOME ?= $(HOME)/.data
 export PJ_ROOT=$(PWD)
+export NVIM_LOG_FILE ?= $(PJ_ROOT)/.nvimlog
 
 ifeq ($(shell uname -s),Darwin)
     UNAME ?= MACOS
@@ -44,7 +45,7 @@ test: nvim-test
 		--verbose \
 		--filter="$(FILTER)"
 
-	-@stty sane
+	-@[ -t 0 ] && stty sane || true
 
 .PHONY: test-all
 test-all: test-010 test-011 test-012 test-nightly
@@ -142,7 +143,7 @@ else
     EMMYLUA_ARCH ?= x64
 endif
 
-EMMYLUA_REF := 0.21.0
+EMMYLUA_REF := 0.22.0
 EMMYLUA_OS ?= $(shell uname -s | tr '[:upper:]' '[:lower:]')
 
 EMMYLUA_RELEASE_URL_BASE := https://github.com/EmmyLuaLs/emmylua-analyzer-rust/releases/download/$(EMMYLUA_REF)
@@ -182,6 +183,7 @@ $(NVIM_TEST_RUNTIME): $(NVIM_TEST)
 emmylua-check: $(EMMYLUA_BIN) $(NVIM_TEST_RUNTIME)
 	VIMRUNTIME=$(NVIM_TEST_RUNTIME) \
 		$(EMMYLUA_BIN) . \
+		--ignore 'scratch/**/*' \
 		--ignore 'test/**/*' \
 		--ignore gen_help.lua
 
