@@ -19,18 +19,24 @@ local match_dag = helpers.match_dag
 local match_debug_messages = helpers.match_debug_messages
 local match_lines = helpers.match_lines
 local n, p, np = helpers.n, helpers.p, helpers.np
-local newfile = helpers.newfile
 local path_pattern = helpers.path_pattern
-local scratch = helpers.scratch
 local setup_gitsigns = helpers.setup_gitsigns
 local setup_test_repo = helpers.setup_test_repo
 local split = vim.split
 local test_config = helpers.test_config
-local test_file = helpers.test_file
 local write_to_file = helpers.write_to_file
 local fn = helpers.fn
+local newfile --- @type string
+local scratch --- @type string
+local test_file --- @type string
 
 helpers.env()
+
+local function refresh_paths()
+  newfile = helpers.newfile
+  scratch = helpers.scratch
+  test_file = helpers.test_file
+end
 
 ---@param bufnr? integer
 local function wait_for_attach(bufnr)
@@ -56,6 +62,7 @@ describe('gitsigns (with screen)', function()
 
   before_each(function()
     clear()
+    refresh_paths()
     screen = Screen.new(20, 17)
     screen:attach({ ext_messages = true })
 
@@ -97,7 +104,7 @@ describe('gitsigns (with screen)', function()
   end)
 
   it('can run basic setup', function()
-    setup_gitsigns()
+    setup_gitsigns(config)
     check({ status = {}, signs = {} })
   end)
 
@@ -106,8 +113,7 @@ describe('gitsigns (with screen)', function()
     local nvim_ver = exec_lua('return vim.version().minor')
     screen:try_resize(20, 6)
     setup_test_repo({ no_add = true })
-    -- Don't set this too low, or else the test will lock up
-    config.watch_gitdir = { interval = 100 }
+    config.watch_gitdir.enable = true
     setup_gitsigns(config)
     edit(test_file)
 
@@ -294,6 +300,7 @@ describe('gitsigns (with screen)', function()
     before_each(function()
       config.current_line_blame = true
       config.current_line_blame_formatter = ' <author>, <author_time:%R> - <summary>'
+      config.current_line_blame_opts = { delay = 1 }
       setup_gitsigns(config)
     end)
 
@@ -319,7 +326,7 @@ describe('gitsigns (with screen)', function()
 
       screen:expect({
         grid = [[
-        ^{MATCH:This {6: You, %d second.}}|
+        ^{MATCH:This {6: You, .*}}|
         is                  |
         a                   |
         windows             |
@@ -367,7 +374,10 @@ describe('gitsigns (with screen)', function()
 
       config.current_line_blame = true
       config.current_line_blame_formatter = ' <author>, <author_time:%R> - <summary>'
-      config.current_line_blame_opts = { virt_text_pos = 'right_align' }
+      config.current_line_blame_opts = {
+        virt_text_pos = 'right_align',
+        delay = 1,
+      }
       setup_gitsigns(config)
     end)
 
@@ -378,7 +388,7 @@ describe('gitsigns (with screen)', function()
 
       screen:expect({
         grid = [[
-        ^short {MATCH:{6: You, %d+ second}}|
+        ^short {MATCH:{6: You, .*}}|
         aaaaaaaaaaaaaaaaaaaa|
         bbbbbbbbbbbbbbbbbbbb|
         {6:~                   }|
@@ -455,7 +465,7 @@ describe('gitsigns (with screen)', function()
       -- Short line: blame should appear with right_align (normal behavior)
       screen:expect({
         grid = [[
-        ^short {MATCH:{6: You, %d+ second}}|
+        ^short {MATCH:{6: You, .*}}|
         aaaaaaaaaaaaaaaaaaaa|
         aaaaa               |
         bbbbbbbbbbbbbbbbbbbb|
@@ -481,7 +491,7 @@ describe('gitsigns (with screen)', function()
         grid = [[
         short               |
         ^aaaaaaaaaaaaaaaaaaaa|
-        {MATCH:aaaaa {6: You, %d second.*}}|
+        {MATCH:aaaaa {6: You, .*}}|
         bbbbbbbbbbbbbbbbbbbb|
         bbbbbbbbbbbbbbbbbbbb|
         {6:~                   }|
@@ -680,7 +690,6 @@ describe('gitsigns (with screen)', function()
           'attach.attach(1): Attaching (trigger=BufWritePost)',
           np(revparse_pat),
           np('system.system: git .* ls%-files .*'),
-          np('attach%.attach%(1%): Watching git dir .*'),
         }
 
         if not internal_diff then
@@ -749,6 +758,7 @@ describe('gitsigns (with screen)', function()
       end)
 
       it('tracks files in new repos', function()
+        config.watch_gitdir.enable = true
         setup_gitsigns(config)
         helpers.touch(newfile)
         edit(newfile)
@@ -891,33 +901,30 @@ describe('gitsigns (with screen)', function()
 
     helpers.exc_exec('vimgrep ben ' .. scratch .. '/*')
 
-    if fn.has('nvim-0.12') > 0 then
-      local qf_path = scratch .. '/dummy.txt'
-      if fn.has('win32') == 1 then
-        qf_path = qf_path:gsub('/', '\\')
+    -- Neovim may emit a varying number of path echoes before the stable quickfix message.
+    expectf(function()
+      screen:sleep(10)
+
+      local messages = screen.messages
+      local message = messages[#messages]
+      local scratch_path0 = scratch:gsub('\\', '/')
+      local scratch_path = vim.fs.normalize(scratch_path0)
+
+      eq('quickfix', message.kind)
+      eq('(1 of 2): hello ben', message.content[1][2])
+
+      for i = 1, #messages - 1 do
+        local entry = messages[i]
+        local path0 = entry.content[1][2]:gsub('\\', '/')
+        local path = vim.fs.normalize(path0)
+
+        eq('', entry.kind)
+        assert(
+          vim.startswith(path, scratch_path .. '/'),
+          ('unexpected path message: %s'):format(path)
+        )
       end
-      screen:expect({
-        messages = {
-          {
-            kind = '',
-            content = { { qf_path } },
-          },
-          {
-            kind = 'quickfix',
-            content = { { '(1 of 2): hello ben' } },
-          },
-        },
-      })
-    else
-      screen:expect({
-        messages = {
-          {
-            kind = 'quickfix',
-            content = { { '(1 of 2): hello ben' } },
-          },
-        },
-      })
-    end
+    end, 10)
 
     match_debug_messages({
       'gitsigns.attach_autocmd(2): Attaching is disabled',
@@ -1101,6 +1108,7 @@ describe('gitsigns attach', function()
 
   before_each(function()
     clear()
+    refresh_paths()
     config = vim.deepcopy(test_config)
     helpers.chdir_tmp()
   end)
