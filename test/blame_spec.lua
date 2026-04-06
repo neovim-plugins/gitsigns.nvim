@@ -1,65 +1,32 @@
 local helpers = require('test.gs_helpers')
 
-local setup_gitsigns = helpers.setup_gitsigns
-local feed = helpers.feed
-local edit = helpers.edit
-local exec_lua = helpers.exec_lua
-local fn = helpers.fn
-local test_config = helpers.test_config
-local clear = helpers.clear
-local expectf = helpers.expectf
-local setup_test_repo = helpers.setup_test_repo
-local eq = helpers.eq
 local check = helpers.check
+local clear = helpers.clear
+local edit = helpers.edit
+local enable_lua_treesitter_on_filetype = helpers.enable_lua_treesitter_on_filetype
+local eq = helpers.eq
+local exec_lua = helpers.exec_lua
+local expectf = helpers.expectf
+local feed = helpers.feed
 local git = helpers.git
+local require_source_hls = helpers.require_source_hls
+local setup_gitsigns = helpers.setup_gitsigns
+local setup_test_repo = helpers.setup_test_repo
+local test_config = helpers.test_config
+local wait_for_attach = helpers.wait_for_attach
 local write_to_file = helpers.write_to_file
 local scratch --- @type string
 local test_file --- @type string
 
 helpers.env()
 
-local function refresh_paths()
-  scratch = helpers.scratch
-  test_file = helpers.test_file
-end
-
-local function require_source_hls()
-  if fn.has('nvim-0.12') == 0 then
-    pending('requires Neovim 0.12+')
-  end
-end
-
-local function enable_lua_treesitter_on_filetype()
-  exec_lua(function()
-    vim.api.nvim_create_autocmd('FileType', {
-      group = vim.api.nvim_create_augroup('gitsigns_blame_treesitter', { clear = true }),
-      pattern = 'lua',
-      callback = function(args)
-        pcall(vim.treesitter.start, args.buf, 'lua')
-        local ok, parser = pcall(vim.treesitter.get_parser, args.buf, 'lua')
-        if ok and parser then
-          pcall(parser.parse, parser, true)
-        end
-      end,
-    })
-
-    vim.cmd('syntax on')
-    vim.bo.filetype = 'lua'
-  end)
-end
-
 local function open_blame_panel()
-  exec_lua(function()
-    local async = require('gitsigns.async')
-    async.run(require('gitsigns.actions.blame').blame):raise_on_error()
-  end)
-
   eq(
-    true,
+    'gitsigns-blame',
     exec_lua(function()
-      return vim.wait(10000, function()
-        return vim.bo.filetype == 'gitsigns-blame'
-      end)
+      local async = require('gitsigns.async')
+      async.run(require('gitsigns.actions.blame').blame):wait(5000)
+      return vim.bo.filetype
     end)
   )
 end
@@ -71,6 +38,7 @@ local function get_blame_panel_state()
     local ns = assert(vim.api.nvim_get_namespaces().gitsigns_blame_win)
     local marks = vim.api.nvim_buf_get_extmarks(bufnr, ns, 0, -1, { details = true })
     local row_hls = {} --- @type table<integer, string[]>
+    local line_widths = {} --- @type integer[]
 
     for _, mark in ipairs(marks) do
       local row = mark[2] + 1
@@ -81,10 +49,16 @@ local function get_blame_panel_state()
       end
     end
 
+    for i, line in ipairs(lines) do
+      line_widths[i] = vim.fn.strdisplaywidth(line)
+    end
+
     return {
       date = os.date('%Y-%m-%d'),
+      line_widths = line_widths,
       lines = lines,
       row_hls = row_hls,
+      win_width = vim.api.nvim_win_get_width(0),
       year = os.date('%Y'),
     }
   end)
@@ -111,7 +85,8 @@ end
 describe('blame', function()
   before_each(function()
     clear()
-    refresh_paths()
+    scratch = helpers.scratch
+    test_file = helpers.test_file
     helpers.chdir_tmp()
     helpers.setup_path()
   end)
@@ -130,34 +105,18 @@ describe('blame', function()
       status = { head = 'main', added = 0, changed = 0, removed = 0 },
       signs = {},
     })
-    exec_lua(function()
-      local async = require('gitsigns.async')
-      async.run(require('gitsigns.actions.blame').blame):raise_on_error()
-    end)
-
-    eq(
-      true,
-      exec_lua(function()
-        return vim.wait(10000, function()
-          return vim.bo.filetype == 'gitsigns-blame'
-        end)
-      end)
-    )
+    open_blame_panel()
 
     local initial_blame_bufname = exec_lua('return vim.api.nvim_buf_get_name(0)')
 
     feed('3G')
     feed('r')
 
-    eq(
-      true,
-      exec_lua(function(initial_name)
-        return vim.wait(5000, function()
-          return vim.bo.filetype == 'gitsigns-blame'
-            and vim.api.nvim_buf_get_name(0) ~= initial_name
-        end)
+    expectf(function()
+      return exec_lua(function(initial_name)
+        return vim.bo.filetype == 'gitsigns-blame' and vim.api.nvim_buf_get_name(0) ~= initial_name
       end, initial_blame_bufname)
-    )
+    end)
 
     eq({ 3, 0 }, helpers.api.nvim_win_get_cursor(0))
     eq('gitsigns-blame', exec_lua('return vim.bo.filetype'))
@@ -208,6 +167,35 @@ describe('blame', function()
     eq('┕', result.lines[2])
     eq(true, has_hl_match(result.row_hls, 1, '^GitSignsBlameColor%.'))
     eq(false, has_hl(result.row_hls, 2, 'Comment'))
+  end)
+
+  it('does not let repeated summary lines widen the side panel', function()
+    setup_gitsigns(test_config)
+    setup_test_repo({
+      test_file_text = { 'one', 'two' },
+    })
+
+    local summary = table.concat({
+      'this is a deliberately long commit summary',
+      'that should not widen the blame side panel',
+    }, ' ')
+
+    helpers.write_to_file(test_file, { 'ONE', 'TWO' })
+    helpers.git('add', test_file)
+    helpers.git('commit', '-m', summary)
+
+    edit(test_file)
+    check({
+      status = { head = 'main', added = 0, changed = 0, removed = 0 },
+      signs = {},
+    })
+
+    open_blame_panel()
+
+    local result = get_blame_panel_state()
+
+    eq(true, result.line_widths[2] > result.line_widths[1])
+    eq(result.line_widths[1] + 1, result.win_width)
   end)
 
   it('supports function side-panel formatters with highlights', function()
@@ -334,11 +322,7 @@ describe('blame', function()
 
     edit(file)
 
-    expectf(function()
-      return exec_lua(function()
-        return vim.b.gitsigns_status_dict.gitdir ~= nil
-      end)
-    end)
+    wait_for_attach()
 
     local result = exec_lua(function(file0)
       local async = require('gitsigns.async')
@@ -390,7 +374,7 @@ describe('blame', function()
     config.gh = true
     setup_gitsigns(config)
     edit(test_file)
-    enable_lua_treesitter_on_filetype()
+    enable_lua_treesitter_on_filetype('gitsigns_blame_treesitter')
 
     check({
       status = { head = 'main', added = 0, changed = 0, removed = 0 },
