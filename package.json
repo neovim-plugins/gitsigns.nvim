@@ -1,7 +1,7 @@
 {
   "name": "@softvisio/gitsigns.nvim",
   "private": true,
-  "description": "Fork of gitsigns.nvim",
+  "description": "Fork of lewis6991/gitsigns.nvim",
   "homepage": "https://github.com/softvisio/gitsigns.nvim",
   "bugs": {
     "url": "https://github.com/softvisio/gitsigns.nvim/issues",
