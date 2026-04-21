@@ -15,7 +15,7 @@ if [ "$old_commit" = "$new_commit" ]; then
   exit
 fi
 
-git switch update-readme
+git switch update-metadata
 git merge --no-edit upstream/main
 
 git switch fix-msys2
@@ -31,8 +31,8 @@ git switch main
 git reset --hard $(git rev-list --max-parents=0 HEAD)
 git merge --no-edit upstream/main
 
-# git merge --no-edit update-readme fix-msys2 feat-git-option feat-git-crypt
-git merge --no-edit update-readme
+# git merge --no-edit update-metadata fix-msys2 feat-git-option feat-git-crypt
+git merge --no-edit update-metadata
 git merge --no-edit fix-msys2
 git merge --no-edit feat-git-option
 git merge --no-edit feat-git-crypt
