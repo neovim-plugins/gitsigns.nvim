@@ -483,7 +483,7 @@ end
 --- @param encoding? string
 --- @return string[] stdout, string? stderr
 function M:get_show_text_at_revision(revision, relpath, encoding)
-  local stdout, stderr = self:get_show_text(revision .. ':' .. relpath, encoding)
+  local stdout, stderr, crypt = self:get_show_text(revision .. ':' .. relpath, encoding)
 
   if
     stderr
@@ -497,11 +497,11 @@ function M:get_show_text_at_revision(revision, relpath, encoding)
       or self:log_rename_status(revision, relpath)
     if old_path then
       log.dprintf('found rename %s -> %s', old_path, relpath)
-      stdout, stderr = self:get_show_text(revision .. ':' .. old_path, encoding)
+      stdout, stderr, crypt = self:get_show_text(revision .. ':' .. old_path, encoding)
     end
   end
 
-  return stdout, stderr
+  return stdout, stderr, crypt
 end
 
 --- @async
