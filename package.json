@@ -2,7 +2,7 @@
   "name": "@neovim-plugins/gitsigns.nvim",
   "private": true,
   "description": "Fork of lewis6991/gitsigns.nvim",
-  "homepage": "https://github.com/neovim-plugins/gitsigns.nvim",
+  "homepage": "https://github.com/neovim-plugins/gitsigns.nvim?tab=readme-ov-file#readme",
   "bugs": {
     "url": "https://github.com/neovim-plugins/gitsigns.nvim/issues",
     "email": "root <root@softvisio.net>"
