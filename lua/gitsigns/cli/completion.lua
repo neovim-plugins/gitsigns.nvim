@@ -49,9 +49,10 @@ local function merge_completions(...)
   return ret
 end
 
+--- Complete branch, tag, and remote names.
 --- @param arglead string
 --- @return string[]
-local function complete_heads(arglead)
+function M.heads(arglead)
   --- @type string[]
   local all =
     vim.fn.systemlist({ config.git_cmd, 'rev-parse', '--symbolic', '--branches', '--tags', '--remotes' })
@@ -74,7 +75,7 @@ local function complete_positional(arglead, spec)
   end
 
   return merge_completions(
-    spec.revision and complete_heads(arglead) or nil,
+    spec.revision and M.heads(arglead) or nil,
     complete_values(arglead, spec.values),
     spec.boolean and complete_values(arglead, { 'true', 'false' }) or nil,
     spec.required ~= true and complete_values(arglead, { 'nil' }) or nil
