@@ -525,9 +525,7 @@ function M.blame(opts)
     blm_wlo.winbar = vim.fn.fnamemodify(name, ':.')
   end
 
-  if vim.fn.exists('&winfixbuf') == 1 then
-    blm_wlo.winfixbuf = true
-  end
+  blm_wlo.winfixbuf = true
 
   vim.cmd(tostring(top))
   vim.cmd('normal! zt')
@@ -555,6 +553,7 @@ function M.blame(opts)
   end, {
     desc = 'Reblame at commit',
     buffer = blm_bufnr,
+    nowait = true,
   })
 
   pmap('n', 'd', function()
@@ -562,6 +561,7 @@ function M.blame(opts)
   end, {
     desc = 'Diff (tab)',
     buffer = blm_bufnr,
+    nowait = true,
   })
 
   pmap('n', 'D', function()
@@ -579,6 +579,7 @@ function M.blame(opts)
   end, {
     desc = 'Reblame at commit parent',
     buffer = blm_bufnr,
+    nowait = true,
   })
 
   pmap('n', 's', function()
@@ -586,6 +587,7 @@ function M.blame(opts)
   end, {
     desc = 'Show commit in a vertical split',
     buffer = blm_bufnr,
+    nowait = true,
   })
 
   pmap('n', 'S', function()
@@ -593,6 +595,7 @@ function M.blame(opts)
   end, {
     desc = 'Show commit in a new tab',
     buffer = blm_bufnr,
+    nowait = true,
   })
 
   pmap('n', 'e', function()
