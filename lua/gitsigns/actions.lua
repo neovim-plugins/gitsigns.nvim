@@ -12,7 +12,7 @@ local api = vim.api
 local current_buf = api.nvim_get_current_buf
 
 local tointeger = util.tointeger
-local validate = util.validate
+local validate = vim.validate
 
 --- @class gitsigns.actions
 local M = {}
@@ -22,6 +22,7 @@ local M = {}
 --- @field split 'aboveleft'|'belowright'|'topleft'|'botright'
 
 --- @class Gitsigns.CmdArgs
+--- @field unified? boolean
 --- @field vertical? boolean
 --- @field split? 'aboveleft'|'belowright'|'topleft'|'botright'
 --- @field global? boolean
@@ -54,6 +55,13 @@ local M = {}
 --- @field use_location_list? boolean Populate the location list instead of the quickfix list.
 --- @field nr? integer Window number or ID when using location list. Defaults to `0`.
 --- @field open? boolean Open the quickfix/location list viewer. Defaults to `true`.
+
+--- @alias Gitsigns.DiffMode 'none'|'split'|'unified'
+
+--- @class (exact) Gitsigns.DiffPanelOpts
+--- @inlinedoc
+--- @field diff? Gitsigns.DiffMode How to display files. Defaults to `'split'`.
+--- @field unified? boolean Alias for `diff = 'unified'` when `diff` is omitted.
 
 --- Variations of functions from M which are used for the Gitsigns command
 --- @type table<string,fun(args: Gitsigns.CmdArgs, params: Gitsigns.CmdParams)>
@@ -212,7 +220,7 @@ function M.toggle_word_diff(value)
     config.word_diff = not config.word_diff
   end
   -- Don't use refresh() to avoid flicker
-  util.redraw({ buf = 0, range = { vim.fn.line('w0') - 1, vim.fn.line('w$') } })
+  api.nvim__redraw({ buf = 0, range = { vim.fn.line('w0') - 1, vim.fn.line('w$') } })
   return config.word_diff
 end
 
@@ -257,7 +265,7 @@ local function update(bufnr)
   if not bcache:schedule() then
     return
   end
-  if vim.wo.diff then
+  if vim.wo.diff or require('gitsigns.unified').is_active(bufnr) then
     require('gitsigns.actions.diffthis').update(bufnr)
   end
 end
@@ -841,6 +849,11 @@ end
 --- If {base} is the index, then the opened buffer is editable and
 --- any written changes will update the index accordingly.
 ---
+--- With `unified = true`, show deleted lines inline in the current window.
+--- Repeat the command to close the view. Use [[gitsigns.nav_hunk()]] to navigate
+--- its changes. Staging and reset actions retain their normal comparison base.
+--- Unmerged files continue to use the three-way split view unless a base is given.
+---
 --- Examples:
 --- ```lua
 ---   -- Diff against the index
@@ -850,6 +863,10 @@ end
 ---   -- Diff against the last commit
 ---   require('gitsigns').diffthis('~1')
 ---   -- :Gitsigns diffthis ~1
+---
+---   -- Show deleted lines inline in the current window. Repeat to close.
+---   require('gitsigns').diffthis(nil, { unified = true })
+---   -- :Gitsigns diffthis unified=true
 --- ```
 ---
 --- For a more complete list of ways to specify bases, see
@@ -871,6 +888,9 @@ function M.diffthis(base, opts, callback)
   if opts.vertical == nil then
     opts.vertical = config.diff_opts.vertical
   end
+  if opts.unified == nil then
+    opts.unified = config.diffthis.unified
+  end
   async_run(callback, require('gitsigns.actions.diffthis').diffthis, base, opts)
 end
 
@@ -879,6 +899,7 @@ function C.diffthis(args, params)
   local opts = {
     vertical = config.diff_opts.vertical,
     split = args.split,
+    unified = args.unified,
   }
 
   if args.vertical ~= nil then
@@ -990,18 +1011,28 @@ end
 --- otherwise they are relative to the repository root. Escape spaces with
 --- backslashes (see [[<f-args>]]).
 ---
+--- Put `--diff=none` before the revision to show the selected buffer beside
+--- the file tree without opening a diff. `--diff=split` is the default:
+--- ```text
+---   :Gitsigns diff --diff=none
+---   :Gitsigns diff --diff=none main..HEAD -- lua/
+--- ```
+--- With `--diff=none`, buffers keep their existing Gitsigns signs and
+--- comparison base.
+---
 --- Use [[gitsigns.show_commit()]] to view the changes introduced by a commit.
 ---
 --- Press `g?` in the panel for keys. Directories sort before files at each
 --- level and use standard fold commands. Closed directories show their changed
 --- file count and total diffstat, including nested files.
 --- Click or press `<CR>` on an entry to open it or toggle its directory fold.
---- Newly loaded diff buffers open at their first change. Already loaded
+--- Newly loaded files open at their first change. Already loaded
 --- buffers keep their cursor position using Neovim's normal buffer behaviour.
 --- Reviewed buffers stay loaded until the panel closes. Cleanup preserves
 --- buffers that were already loaded, modified, or open in other windows.
---- In either diff buffer, `]f` / `[f` select the next / previous file without
---- changing windows. A count skips files; navigation stops at either end.
+--- From the panel or a file window, `]f` / `[f` open the next / previous file
+--- while keeping focus in the current window. A count skips files; navigation
+--- stops at either end.
 ---
 --- Working-tree comparisons list each file once. The two status columns show
 --- index changes (relative to HEAD) and working-tree changes (relative to the
@@ -1013,25 +1044,43 @@ end
 --- unstages the file. On a directory, these keys act on all listed files
 --- beneath it, including nested directories.
 --- These actions operate on saved files and leave unsaved buffer edits intact.
---- Staging refreshes the panel and keeps the displayed diff.
+--- Staging or unstaging from the panel or a file buffer refreshes the tree
+--- and keeps the displayed file.
 ---
 --- Regular working-tree files are editable; revision buffers are read-only.
 --- See [[diff-mode]] for diff navigation.
 ---
+--- Press `gu` in the file panel to toggle a unified view, showing
+--- deleted lines inline. Start in this layout with `:Gitsigns diff --diff=unified`
+--- or `require('gitsigns').diff(nil, nil, { diff = 'unified' })`.
+--- `--unified` and `{ unified = true }` are aliases for this layout.
+--- Staging and reset actions retain their normal comparison base.
+---
 --- @param revision string? (default: working tree)
 --- @param paths string[]? Git pathspecs.
+--- @param opts Gitsigns.DiffPanelOpts? Additional options.
 --- @param callback? fun(err?: string)
 --- @overload fun(revision?: string, callback?: fun(err?: string))
-function M.diff(revision, paths, callback)
+--- @overload fun(revision?: string, paths?: string[], callback?: fun(err?: string))
+function M.diff(revision, paths, opts, callback)
   if type(paths) == 'function' then
     callback, paths = paths, nil
+  elseif type(opts) == 'function' then
+    callback, opts = opts, nil
   end
-  async_run(callback, require('gitsigns.actions.diff'), revision, paths)
+  async_run(callback, require('gitsigns.actions.diff'), revision, paths, nil, opts)
 end
 
 --- Separate the optional revision from Git pathspecs.
 --- @param args string[]
 function C.diff(args)
+  local diff = args[1] and args[1]:match('^%-%-diff=(.*)$')
+  if args[1] == '--unified' then
+    diff = 'unified'
+  end
+  if diff then
+    args = vim.list_slice(args, 2)
+  end
   local revision = args[1]
   local first_path = 2
   if revision == '--' then
@@ -1039,7 +1088,8 @@ function C.diff(args)
   elseif args[2] == '--' then
     first_path = 3
   end
-  M.diff(revision, vim.list_slice(args, first_path))
+  --- @cast diff Gitsigns.DiffMode?
+  M.diff(revision, vim.list_slice(args, first_path), { diff = diff })
 end
 
 C_meta.diff = {
@@ -1051,6 +1101,13 @@ C_meta.diff = {
   --- @return string[]
   complete = function(arglead, line)
     local args = require('gitsigns.cli.context').parse(line).raw_args
+    local diff = args[1] and args[1]:match('^%-%-diff=(.*)$')
+    if args[1] == '--unified' then
+      diff = 'unified'
+    end
+    if diff then
+      args = vim.list_slice(args, 2)
+    end
     local matches
     if #args == 0 then
       matches = require('gitsigns.cli.completion').heads(arglead)
@@ -1066,6 +1123,16 @@ C_meta.diff = {
       and not vim.tbl_contains(matches, '--')
     then
       matches[#matches + 1] = '--'
+    end
+    if #args == 0 and not diff then
+      local options = arglead:find('=', 1, true)
+          and { '--diff=none', '--diff=split', '--diff=unified' }
+        or { '--diff=', '--unified' }
+      for _, option in ipairs(options) do
+        if vim.startswith(option, arglead) then
+          matches[#matches + 1] = option
+        end
+      end
     end
     return matches
   end,
