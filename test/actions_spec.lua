@@ -143,6 +143,40 @@ describe('actions', function()
     })
   end)
 
+  for _, cancel in ipairs({ false, true }) do
+    it(
+      'ignores repeated picker callbacks after ' .. (cancel and 'cancellation' or 'selection'),
+      function()
+        local signs_enabled = exec_lua(function(cancel0)
+          local async = require('gitsigns.async')
+          local config = require('gitsigns.config').config
+          local choose --- @type fun(item?: string)
+
+          config.signcolumn = true
+          vim.ui.select = function(_, _, callback)
+            choose = callback
+            return {
+              close = function()
+                error('picker handles must not be closed by async')
+              end,
+            }
+          end
+
+          local task = async.run(require('gitsigns.cli').run, { args = '', fargs = {} })
+          choose(not cancel0 and 'toggle_signs' or nil)
+          task:wait(1000)
+
+          choose('toggle_signs')
+          choose(nil)
+          task:wait(1000)
+
+          return config.signcolumn
+        end, cancel)
+        eq(cancel, signs_enabled)
+      end
+    )
+  end
+
   it('show_commit does not include ansi color codes', function()
     setup_test_repo()
     edit(test_file)
@@ -183,7 +217,7 @@ describe('actions', function()
       { '--global=true', '--global=false' },
       complete('--global=', 'Gitsigns change_base main --global=')
     )
-    eq({ '--split=', '--vertical' }, complete('--', 'Gitsigns diffthis --'))
+    eq({ '--split=', '--unified', '--vertical' }, complete('--', 'Gitsigns diffthis --'))
     eq(
       { '--vertical=true', '--vertical=false' },
       complete('--vertical=', 'Gitsigns diffthis --vertical=')
@@ -219,11 +253,33 @@ describe('actions', function()
     write_to_file(scratch .. '/src/new file%.lua', { 'new' })
     write_to_file(scratch .. '/--flag', { 'flag' })
     eq({ 'main' }, complete('ma', 'Gitsigns diff ma'))
+    eq({ '--', '--diff=', '--unified' }, complete('--', 'Gitsigns diff --'))
+    eq({ '--diff=' }, complete('--d', 'Gitsigns diff --d'))
+    eq(
+      { '--diff=none', '--diff=split', '--diff=unified' },
+      complete('--diff=', 'Gitsigns diff --diff=')
+    )
+    eq({ '--diff=none' }, complete('--diff=n', 'Gitsigns diff --diff=n'))
+    eq({ 'main' }, complete('ma', 'Gitsigns diff --diff=none ma'))
+    eq({ '--' }, complete('--', 'Gitsigns diff --diff=none --'))
+    eq({ 'main' }, complete('ma', 'Gitsigns diff --diff=unified ma'))
+    eq({ 'main' }, complete('ma', 'Gitsigns diff --unified ma'))
     eq({ '--flag', '--' }, complete('--', 'Gitsigns diff HEAD --'))
     eq({ '--flag' }, complete('--f', 'Gitsigns diff -- --f'))
     local backslash = exec_lua("return vim.fn.has('win32') == 1 and not vim.o.shellslash")
     local matches = { 'src' .. (backslash and '\\\\' or '/') .. 'new\\ file%.lua' }
-    for _, prefix in ipairs({ '-- ', 'HEAD ', 'HEAD -- --flag ', 'HEAD --flag ' }) do
+    for _, prefix in ipairs({
+      '-- ',
+      'HEAD ',
+      'HEAD -- --flag ',
+      'HEAD --flag ',
+      '--diff=none -- ',
+      '--diff=none HEAD ',
+      '--diff=unified -- ',
+      '--diff=unified HEAD ',
+      '--unified -- ',
+      '--unified HEAD ',
+    }) do
       eq(matches, complete('src/n', 'Gitsigns diff ' .. prefix .. 'src/n'))
     end
     eq(matches, complete('src/new\\ f', 'Gitsigns diff -- src/new\\ f'))
