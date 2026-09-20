@@ -49,6 +49,9 @@ local function open_diff_command(args)
   api.nvim_command('Gitsigns diff ' .. args)
   helpers.expectf(function()
     eq('gitsigns-diff', exec_lua('return vim.bo.filetype'))
+    -- The panel exists before its initial asynchronous file open finishes.
+    local selection = api.nvim_get_namespaces().gitsigns_diff_selection
+    eq(1, #api.nvim_buf_get_extmarks(0, selection, 0, -1, {}))
     if args:find('^%-%-unified') or args:find('^%-%-diff=unified') then
       eq(
         true,
@@ -103,11 +106,12 @@ local function expect_diff(...)
 end
 
 --- Read displayed file diffstats in panel order.
+--- @param panel? integer
 --- @return string[]
-local function diffstat()
-  return exec_lua(function()
+local function diffstat(panel)
+  return exec_lua(function(buf)
     local stats = {}
-    for _, mark in ipairs(vim.api.nvim_buf_get_extmarks(0, -1, 0, -1, { details = true })) do
+    for _, mark in ipairs(vim.api.nvim_buf_get_extmarks(buf, -1, 0, -1, { details = true })) do
       local opts = mark[4]
       if opts.virt_text_pos == 'right_align' then
         local text = ''
@@ -118,7 +122,7 @@ local function diffstat()
       end
     end
     return stats
-  end)
+  end, panel or 0)
 end
 
 --- @param pattern string Lua pattern matching the panel line.
@@ -283,6 +287,36 @@ describe('diff panel', function()
       end)
     end
   )
+
+  it('accepts diff layout options after the revision', function()
+    helpers.write_to_file(helpers.test_file, { 'committed' })
+    git('commit', '-am', 'Change the file')
+    helpers.write_to_file(helpers.test_file, { 'working tree' })
+
+    for _, option in ipairs({
+      '--unified',
+      '--diff=unified -- dummy.txt',
+      '--diff=none -- dummy.txt',
+      '--diff=split -- dummy.txt',
+    }) do
+      open_diff_command('HEAD~ ' .. option)
+      eq({ '  M dummy.txt' }, api.nvim_buf_get_lines(0, 1, -3, false), option)
+      select_file('dummy.txt')
+      helpers.expectf(function()
+        eq({ 'working tree' }, api.nvim_buf_get_lines(0, 0, -1, false), option)
+        if option:find('unified', 1, true) then
+          eq(2, #api.nvim_tabpage_list_wins(0))
+          eq({ 'original' }, unified_removed())
+        elseif option:find('none', 1, true) then
+          eq(2, #api.nvim_tabpage_list_wins(0))
+          eq({}, diff_state())
+        else
+          eq({ { 'original' }, { 'working tree' } }, diff_state())
+        end
+      end)
+      select_file('dummy.txt', 'q')
+    end
+  end)
 
   it('shows deleted and renamed historical files in unified mode', function()
     helpers.write_to_file(helpers.scratch .. '/old.txt', { 'unchanged', 'old' })
@@ -711,16 +745,25 @@ describe('diff panel', function()
   end)
 
   it('preserves spaces, assignments, flags, and numeric path names', function()
-    local names =
-      { '--diff=none', '--flag', '001', 'a=b', 'nil', 'with space.txt', '{one,two}.txt' }
+    local names = {
+      '--diff=none',
+      '--flag',
+      '--unified',
+      '001',
+      'a=b',
+      'nil',
+      'with space.txt',
+      '{one,two}.txt',
+    }
     for _, name in ipairs(names) do
       helpers.write_to_file(helpers.scratch .. '/' .. name, { name })
     end
     helpers.write_to_file(helpers.scratch .. '/not-selected', { 'outside' })
-    open_diff_command('-- --diff=none --flag 001 a=b nil with\\ space.txt {one,two}.txt')
+    open_diff_command('-- --diff=none --flag --unified 001 a=b nil with\\ space.txt {one,two}.txt')
     eq({
       ' ?? --diff=none',
       ' ?? --flag',
+      ' ?? --unified',
       ' ?? 001',
       ' ?? a=b',
       ' ?? nil',
@@ -820,6 +863,137 @@ describe('diff panel', function()
     helpers.eq_path(helpers.scratch .. '/new dir/new file.txt', api.nvim_buf_get_name(0))
     eq(true, exec_lua('return vim.bo.modifiable'))
     helpers.wait_for_attach()
+  end)
+
+  it('counts saved changes against the selected revision despite unsaved edits', function()
+    helpers.write_to_file(helpers.test_file, { 'committed', 'second line' })
+    git('commit', '-am', 'Change the file')
+    local staged = { 'staged', 'second line', 'third line' }
+    helpers.write_to_file(helpers.test_file, staged)
+    git('add', 'dummy.txt')
+    helpers.write_to_file(helpers.test_file, { 'saved working tree' })
+    helpers.edit(helpers.test_file)
+    helpers.wait_for_attach()
+    api.nvim_buf_set_lines(0, 0, -1, false, { 'original', 'unsaved' })
+
+    open_diff('HEAD~')
+    local panel = api.nvim_get_current_buf()
+    eq({ '+1 -1' }, diffstat(panel))
+    eq({ ' MM dummy.txt' }, api.nvim_buf_get_lines(panel, 1, -3, false))
+    expect_diff({ 'original' }, { 'original', 'unsaved' })
+    select_file('dummy.txt')
+    api.nvim_command('Gitsigns reset_buffer')
+    eq(staged, api.nvim_buf_get_lines(0, 0, -1, false))
+    eq({ '+1 -1' }, diffstat(panel))
+    api.nvim_command('write')
+    helpers.expectf(function()
+      eq({ '+3 -1' }, diffstat(panel))
+      eq({ ' M  dummy.txt' }, api.nvim_buf_get_lines(panel, 1, -3, false))
+    end)
+
+    -- Commit comparisons retain their own counts.
+    open_commit('HEAD')
+    eq({ '+2 -1' }, diffstat())
+  end)
+
+  for _, diff in ipairs({ 'split', 'none', 'unified' }) do
+    it('refreshes saved counts after writing reset hunks: diff=' .. diff, function()
+      local original = { 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight' }
+      helpers.write_to_file(helpers.test_file, original)
+      git('commit', '-am', 'Add lines')
+      local changed = vim.deepcopy(original)
+      changed[2], changed[8] = 'changed', 'also changed'
+      helpers.write_to_file(helpers.test_file, changed)
+      helpers.edit(helpers.test_file)
+      helpers.wait_for_attach()
+      local source_win = api.nvim_get_current_win()
+
+      open_diff(nil, nil, { diff = diff })
+      local panel = api.nvim_get_current_buf()
+      eq({ '+2 -2' }, diffstat(panel))
+      select_file('dummy.txt')
+      local right = api.nvim_get_current_win()
+      api.nvim_win_set_cursor(right, { 2, 0 })
+      api.nvim_command('Gitsigns reset_hunk')
+      eq('two', api.nvim_buf_get_lines(0, 1, 2, false)[1])
+      eq({ '+2 -2' }, diffstat(panel))
+      eq(changed, helpers.fn.readfile(helpers.test_file))
+      api.nvim_command('write')
+      helpers.expectf(function()
+        eq({ '+1 -1' }, diffstat(panel))
+        eq(right, api.nvim_get_current_win())
+      end)
+
+      -- Saving from another tab refreshes the panel without taking focus.
+      api.nvim_set_current_win(source_win)
+      api.nvim_command('Gitsigns reset_buffer')
+      eq(original, api.nvim_buf_get_lines(0, 0, -1, false))
+      eq({ '+1 -1' }, diffstat(panel))
+      eq({ '  M dummy.txt' }, api.nvim_buf_get_lines(panel, 1, -3, false))
+
+      api.nvim_command('write')
+      helpers.expectf(function()
+        eq({ 'No changes' }, api.nvim_buf_get_lines(panel, 1, -3, false))
+        eq(source_win, api.nvim_get_current_win())
+      end)
+    end)
+  end
+
+  it('refreshes saved directory counts on write without moving the panel', function()
+    for _, name in ipairs({ 'one', 'two' }) do
+      helpers.write_to_file(helpers.scratch .. '/src/' .. name .. '.txt', { 'original' })
+    end
+    git('add', '.')
+    git('commit', '-m', 'Add files')
+    for _, name in ipairs({ 'one', 'two' }) do
+      local file = helpers.scratch .. '/src/' .. name .. '.txt'
+      helpers.write_to_file(file, { 'saved change' })
+      helpers.edit(file)
+      helpers.wait_for_attach()
+      api.nvim_buf_set_lines(0, 0, -1, false, { 'unsaved change', 'extra line' })
+    end
+    local other = api.nvim_get_current_buf()
+    helpers.write_to_file(helpers.scratch .. '/a/extra.txt', { 'untracked' })
+
+    open_diff(nil, { 'a/', 'src/' })
+    local panel, panel_win = api.nvim_get_current_buf(), api.nvim_get_current_win()
+    eq({ '+1', '+1 -1', '+1 -1' }, diffstat(panel))
+    select_file('one.txt')
+    expect_diff({ 'original' }, { 'unsaved change', 'extra line' })
+    local right = api.nvim_get_current_win()
+    select_line('^ src/$')
+    local view = exec_lua(function(win)
+      return vim.api.nvim_win_call(win, function()
+        vim.cmd('normal! zt')
+        return vim.fn.winsaveview()
+      end)
+    end, panel_win)
+    eq(4, view.topline)
+    local selection = api.nvim_get_namespaces().gitsigns_diff_selection
+    local selected = api.nvim_buf_get_extmarks(panel, selection, 0, -1, {})
+    local lines = api.nvim_buf_get_lines(panel, 0, -1, false)
+
+    api.nvim_set_current_win(right)
+    api.nvim_command('write')
+    helpers.expectf(function()
+      eq({ '+1', '+2 -1', '+1 -1' }, diffstat(panel))
+      eq(true, api.nvim_get_option_value('modified', { buf = other }))
+      eq(lines, api.nvim_buf_get_lines(panel, 0, -1, false))
+      eq(selected, api.nvim_buf_get_extmarks(panel, selection, 0, -1, {}))
+      eq(
+        view,
+        exec_lua(function(win)
+          return vim.api.nvim_win_call(win, vim.fn.winsaveview)
+        end, panel_win)
+      )
+      eq(right, api.nvim_get_current_win())
+      exec_lua(function(win)
+        vim.api.nvim_win_call(win, function()
+          assert(vim.fn.foldclosed(4) == 4)
+          assert(vim.fn.foldtextresult(4):find('+3 -2', 1, true))
+        end)
+      end, panel_win)
+    end)
   end)
 
   for _, diff in ipairs({ 'split', 'none' }) do
