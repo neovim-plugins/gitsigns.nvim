@@ -195,8 +195,8 @@ diff({revision}, {paths}, {opts}, {callback})                     *gitsigns.diff
     otherwise they are relative to the repository root. Escape spaces with
     backslashes (see |<f-args>|).
 
-    Put `--diff=none` before the revision to show the selected buffer beside
-    the file tree without opening a diff. `--diff=split` is the default:
+    Use `--diff=none` to show the selected buffer beside the file tree
+    without opening a diff. `--diff=split` is the default:
     >text
       :Gitsigns diff --diff=none
       :Gitsigns diff --diff=none main..HEAD -- lua/
@@ -230,6 +230,8 @@ diff({revision}, {paths}, {opts}, {callback})                     *gitsigns.diff
     These actions operate on saved files and leave unsaved buffer edits intact.
     Staging or unstaging from the panel or a file buffer refreshes the tree
     and keeps the displayed file.
+    The file list, status columns and diffstats reflect saved files and
+    refresh on write. Unsaved edits appear in the file pane.
 
     Regular working-tree files are editable; revision buffers are read-only.
     See |diff-mode| for diff navigation.
@@ -239,6 +241,8 @@ diff({revision}, {paths}, {opts}, {callback})                     *gitsigns.diff
     --diff=unified`
     or `require('gitsigns').diff(nil, nil, { diff = 'unified' })`.
     `--unified` and `{ unified = true }` are aliases for this layout.
+    Layout options can appear before or after the revision. Use `--` before
+    paths that could be mistaken for options.
     Staging and reset actions retain their normal comparison base.
 
     Parameters: ~
