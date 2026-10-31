@@ -18,12 +18,6 @@ fi
 git switch update-metadata
 git merge --no-edit upstream/main
 
-git switch fix-msys2
-git merge --no-edit upstream/main
-
-git switch feat-git-option
-git merge --no-edit upstream/main
-
 git switch feat-git-crypt
 git merge --no-edit upstream/main
 
@@ -31,10 +25,8 @@ git switch main
 git reset --hard $(git rev-list --max-parents=0 HEAD)
 git merge --no-edit upstream/main
 
-# git merge --no-edit update-metadata fix-msys2 feat-git-option feat-git-crypt
+# git merge --no-edit update-metadata feat-git-crypt
 git merge --no-edit update-metadata
-git merge --no-edit fix-msys2
-git merge --no-edit feat-git-option
 git merge --no-edit feat-git-crypt
 
 git push --all --force
