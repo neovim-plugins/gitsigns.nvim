@@ -312,6 +312,89 @@ describe('gitdir_watcher', function()
     helpers.check({ signs = {} }, b2)
   end)
 
+  it('debounces cwd HEAD events across watcher restarts', function()
+    setup_test_repo()
+    git('branch', 'feature/foo')
+    helpers.setup_path()
+
+    local result = helpers.exec_lua(function(scratch)
+      vim.cmd.cd(scratch)
+      local on_event --- @type fun(err?: string)?
+      local starts = 0
+      local new_fs_event = vim.uv.new_fs_event
+      vim.uv.new_fs_event = function()
+        return {
+          stop = function() end,
+          getpath = function() end,
+          start = function(_, _, _, callback)
+            starts = starts + 1
+            on_event = callback
+          end,
+        } --[[@as uv.uv_fs_event_t]]
+      end
+
+      local calls = 0
+      local system0 = vim.system
+      vim.system = function(cmd, ...)
+        if vim.tbl_contains(cmd, 'rev-parse') then
+          calls = calls + 1
+        end
+        return system0(cmd, ...)
+      end
+
+      require('gitsigns').setup({ auto_attach = false })
+      assert(vim.wait(2000, function()
+        return on_event ~= nil and vim.g.gitsigns_head == 'main'
+      end))
+      vim.uv.new_fs_event = new_fs_event
+      calls = 0
+
+      -- Each event should stat HEAD once, including watcher restarts.
+      local head_stats = 0
+      local fs_stat = vim.uv.fs_stat
+      vim.uv.fs_stat = function(path, ...)
+        if vim.fs.basename(path) == 'HEAD' then
+          head_stats = head_stats + 1
+        end
+        return fs_stat(path, ...)
+      end
+
+      -- A read may produce an event without changing the file contents.
+      for _ = 1, 3 do
+        vim.fn.readfile('.git/HEAD')
+        assert(on_event)()
+      end
+      vim.wait(300, function()
+        return false
+      end)
+      assert(calls == 0 and starts == 1)
+
+      for i = 1, 3 do
+        local branch = i == 2 and 'main' or 'feature/foo'
+        vim.fn.writefile({ 'ref: refs/heads/' .. branch }, '.git/HEAD')
+        assert(on_event)()
+        assert(vim.wait(1000, function()
+          return starts == i + 1
+        end))
+      end
+      vim.wait(300, function()
+        return false
+      end)
+      local burst = { calls, vim.g.gitsigns_head }
+
+      vim.fn.writefile({ 'ref: refs/heads/main' }, '.git/HEAD')
+      assert(on_event)()
+      vim.wait(300, function()
+        return false
+      end)
+      vim.system = system0
+      vim.uv.fs_stat = fs_stat
+      return { burst, { calls, vim.g.gitsigns_head }, head_stats }
+    end, helpers.scratch)
+
+    eq({ { 1, 'feature/foo' }, { 2, 'main' }, 7 }, result)
+  end)
+
   it('falls back to fs_poll when fs_event fails', function()
     setup_test_repo({ no_add = true })
     install_failing_fs_watchers()
@@ -412,7 +495,19 @@ describe('gitdir_watcher', function()
           local replacement = assert(watcher.handles[path])
           assert(replacement ~= old and old:is_closing())
         else
-          old._cb(nil, nil, nil)
+          local fs_stat = vim.uv.fs_stat
+          local current_stat = assert(fs_stat(path))
+          local head_stats = 0
+          vim.uv.fs_stat = function(target, ...)
+            if target == path then
+              head_stats = head_stats + 1
+            end
+            return fs_stat(target, ...)
+          end
+          old._cb(nil, current_stat, current_stat)
+          vim.uv.fs_stat = fs_stat
+          -- Watch resolution still checks HEAD; fingerprinting reuses the poll stat.
+          assert(head_stats == 1, ('Expected one HEAD stat, got %d'):format(head_stats))
         end
 
         local changed = vim.wait(1000, function()
@@ -543,7 +638,7 @@ describe('gitdir_watcher', function()
 
       local gitdir = repo.gitdir
       local watcher = repo._watcher
-      local handles = {} --- @type uv.uv_fs_event_t[]
+      local handles = {} --- @type Gitsigns.FsEvent[]
       -- `watcher.handles` is a map from watched dir -> handle. Copy into a
       -- list so we can assert every handle is closed after GC.
       for _, handle in pairs(watcher.handles) do
