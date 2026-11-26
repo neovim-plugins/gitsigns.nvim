@@ -100,6 +100,39 @@ describe('git', function()
     eq({ 'a_enter', 'a_exit', 'b_enter', 'b_exit' }, result.events)
   end)
 
+  it('discovers a repo after a directory disappears during Git startup', function()
+    setup_test_repo()
+
+    local disappearing = scratch .. '/disappearing'
+    mkdir(disappearing)
+
+    local toplevel = exec_lua(function(root, cwd)
+      local async = require('gitsigns.async')
+      local system = require('gitsigns.system')
+
+      -- Remove the directory after Repo.get() checks it, just before spawning Git.
+      local spawn = system.system
+      system.system = function(cmd, opts, on_exit)
+        if opts and opts.cwd == cwd then
+          assert(vim.uv.fs_rmdir(cwd))
+        end
+        return spawn(cmd, opts, on_exit)
+      end
+
+      local Repo = require('gitsigns.git.repo')
+      system.system = spawn
+
+      local ok, err = async.run(Repo.get, cwd):pwait(5000)
+      assert(not ok and type(err) == 'string' and err:find('ENOENT', 1, true), tostring(err))
+
+      local repo = assert(async.run(Repo.get, root):wait(5000))
+      repo:unref()
+      return repo.toplevel
+    end, scratch, disappearing)
+
+    eq_path(scratch, toplevel)
+  end)
+
   it('log_rename_status handles spaced filenames', function()
     helpers.git_init_scratch()
 
@@ -281,6 +314,38 @@ describe('git', function()
     eq_path(submodule_worktree, result.info.toplevel)
     eq_path(submodule_gitdir, result.info.gitdir)
   end)
+
+  for _, path in ipairs({ 'main', 'worktrees/main' }) do
+    it('stages changes in a worktree inside a bare repo at ' .. path .. ' (#1548)', function()
+      local source = scratch .. '/source'
+      local bare = scratch .. '/bare.git'
+      local linked = bare .. '/' .. path
+
+      init_repo(source)
+      write_to_file(source .. '/file.txt', { 'original' })
+      git_in(source, 'add', 'file.txt')
+      git_in(source, 'commit', '-m', 'initial commit')
+      system_ok({ 'git', 'clone', '--bare', source, bare }, 'failed to clone bare repo')
+      git_in(bare, 'config', 'core.fsmonitor', 'false')
+
+      -- worktrees/main is also where Git stores the linked worktree's metadata.
+      git_in(bare, 'worktree', 'add', linked, 'main')
+
+      helpers.setup_gitsigns(helpers.test_config)
+      helpers.edit(linked .. '/file.txt')
+      helpers.wait_for_attach()
+
+      helpers.api.nvim_buf_set_lines(0, 0, -1, false, { 'changed' })
+      helpers.check({ signs = { changed = 1 } })
+
+      helpers.stage_hunk({ 1, 1 })
+      eq('changed\n', fn.system({ 'git', '-C', linked, 'show', ':file.txt' }))
+
+      helpers.reset_buffer_index()
+      eq('original\n', fn.system({ 'git', '-C', linked, 'show', ':file.txt' }))
+      helpers.check({ signs = { changed = 1 } })
+    end)
+  end
 
   for _, relative in ipairs({ false, true }) do
     it(
