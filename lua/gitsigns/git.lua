@@ -171,8 +171,24 @@ function Obj:get_show_text(revision, relpath)
     log.dprint('no base object')
     return { '' }
   end
+  local stdout, stderr, crypt = self.repo:get_show_text(object, self.encoding)
 
-  return self.repo:get_show_text(self.object_name, self.encoding)
+  if revision then
+    --- @cast relpath -?
+    stdout, stderr, crypt = self.repo:get_show_text_at_revision(revision, relpath, self.encoding)
+  else
+    stdout, stderr, crypt = self.repo:get_show_text(assert(self.object_name), self.encoding)
+  end
+
+  if not crypt and not self.i_crlf and self.w_crlf then
+    -- Add cr
+    -- Do not add cr to the newline at the end of file
+    for i = 1, #stdout - 1 do
+      stdout[i] = stdout[i] .. '\r'
+    end
+  end
+
+  return stdout, stderr
 end
 
 --- @param file string
